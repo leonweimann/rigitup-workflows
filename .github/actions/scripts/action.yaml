@@ -1,0 +1,27 @@
+name: Provide this repository's scripts
+description: Exposes the checkout path of the workflow repository to the calling workflow.
+
+# A reusable workflow cannot check out its own repository: github.workflow_sha
+# names the *caller's* run, whose commit does not exist here. An action does
+# carry its own repository and ref in the uses: reference, so referencing this
+# one puts the whole repository on disk. It hands back the path so that a
+# workflow can run several scripts without an action per script.
+
+outputs:
+  path:
+    description: Absolute path to the root of the workflow repository.
+    value: ${{ steps.resolve.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        root=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+        [ -d "$root/scripts" ] || {
+          echo "::error::$root does not look like the workflow repository"
+          exit 1
+        }
+        echo "path=$root" >> "$GITHUB_OUTPUT"

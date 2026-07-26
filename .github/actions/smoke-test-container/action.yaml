@@ -1,0 +1,34 @@
+name: Smoke test a container image
+description: Starts the image and polls its health endpoint until it reports ok.
+
+# Exists so that a reusable workflow can reach the scripts in this repository.
+# A second actions/checkout cannot: inside a called workflow, github.workflow_sha
+# is the SHA of the *calling* run, and that commit does not exist here. An
+# action carries its ref in the uses: reference, so GitHub checks this
+# repository out at the matching commit on its own.
+
+inputs:
+  image:
+    description: Image reference to start.
+    required: true
+  port:
+    description: Port the container listens on.
+    required: true
+  health-path:
+    description: Path of the health endpoint.
+    required: false
+    default: /health
+
+runs:
+  using: composite
+  steps:
+    - name: Smoke test
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PORT: ${{ inputs.port }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+      run: |
+        set -euo pipefail
+        root=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+        "$root/scripts/ci/smoke-test-container.sh" "$IMAGE" "$PORT" "$HEALTH_PATH"

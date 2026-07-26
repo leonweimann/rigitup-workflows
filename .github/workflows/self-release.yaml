@@ -1,0 +1,132 @@
+# THIS REPOSITORY'S OWN RELEASE — tags this library, not a consumer.
+# The consumer-facing release workflow is release.yaml.
+name: Self release
+
+# Manual on purpose. The artefact here is a git ref, so a release is a decision
+# about the interface — inputs, outputs, required permissions, job names — not
+# a build that could be triggered by a commit.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to tag, with a leading v, e.g. v0.2.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::'$VERSION' is not a vMAJOR.MINOR.PATCH tag"
+            exit 1
+          }
+
+      # Not "was green at some point" but "is green for exactly this commit".
+      # v0.1.0 first landed on a commit whose self check was red; this is the
+      # gate that would have caught it.
+      - name: Require a green self check for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == "Lint workflows and scripts")]
+                    | if length == 0 then "missing"
+                      elif any(.status != "completed") then "running"
+                      elif all(.conclusion == "success") then "success"
+                      else "failure" end')
+            case "$state" in
+              success)
+                echo "the self check is green for $SHA"
+                exit 0
+                ;;
+              running)
+                echo "attempt $attempt: the self check is still running"
+                sleep 20
+                ;;
+              missing)
+                echo "::error::no self check has run for $SHA"
+                exit 1
+                ;;
+              *)
+                echo "::error::the self check is $state for $SHA — releasing it would freeze the failure"
+                exit 1
+                ;;
+            esac
+          done
+          echo "::error::the self check did not finish in time"
+          exit 1
+
+      - name: Check self references
+        run: scripts/ci/check-self-references.sh
+
+      - name: Create the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha 2> /dev/null); then
+            [ "$existing" = "$SHA" ] || {
+              echo "::error::$VERSION already points at $existing, expected $SHA"
+              exit 1
+            }
+            echo "$VERSION already exists and matches"
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$VERSION" -f sha="$SHA" > /dev/null
+          echo "created $VERSION at $SHA"
+
+      - name: Publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $VERSION already exists"
+          else
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "$VERSION" --generate-notes
+          fi
+          url=$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          echo "release_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ github.sha }}
+          URL: ${{ steps.publish.outputs.release_url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### $VERSION"
+            echo
+            echo "- Commit: \`$SHA\`"
+            echo "- Release: $URL"
+            echo
+            echo "Aufrufer heben ihre Pins auf \`$SHA\` mit dem Kommentar \`# $VERSION\`."
+          } >> "$GITHUB_STEP_SUMMARY"

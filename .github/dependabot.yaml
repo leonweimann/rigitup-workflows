@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # The repository that enforces SHA pinning everywhere else has to keep its
+  # own pins current. "/" covers the workflows; the glob covers the composite
+  # actions, whose action.yaml files are not scanned by the root entry.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    ignore:
+      # This repository's references to its own actions are not dependencies.
+      # They must point at the newest commit that touched an action or a
+      # script, which check-self-references.sh enforces. Dependabot instead
+      # proposes the newest commit on main — typically the one that updated
+      # the pins, which changed no content at all. Following it would break
+      # the self check.
+      - dependency-name: leonweimann/rigitup-workflows/*

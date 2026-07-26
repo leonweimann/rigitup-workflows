@@ -1,0 +1,45 @@
+name: Classify a release commit
+description: Decides by content, not by author, whether a commit on main is a release.
+
+inputs:
+  token:
+    description: Token with read access to pull requests.
+    required: true
+  sha:
+    description: Commit on main to classify.
+    required: true
+  allow-existing-release:
+    description: Accept an existing tag or release, for recovery runs.
+    required: false
+    default: "false"
+
+outputs:
+  is_release:
+    description: Whether this commit is a release commit.
+    value: ${{ steps.classify.outputs.is_release }}
+  part:
+    description: patch, minor or major.
+    value: ${{ steps.classify.outputs.part }}
+  version:
+    description: Version without the leading v.
+    value: ${{ steps.classify.outputs.version }}
+  tag:
+    description: Tag to create, including the leading v.
+    value: ${{ steps.classify.outputs.tag }}
+  pr_number:
+    description: Number of the release pull request.
+    value: ${{ steps.classify.outputs.pr_number }}
+
+runs:
+  using: composite
+  steps:
+    - id: classify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SHA: ${{ inputs.sha }}
+        ALLOW_EXISTING_RELEASE: ${{ inputs.allow-existing-release }}
+      run: |
+        set -euo pipefail
+        root=$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)
+        "$root/scripts/release/classify-release.sh"

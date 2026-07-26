@@ -1,0 +1,42 @@
+# THIS REPOSITORY'S OWN CI — the only workflow here that runs for itself.
+# Everything else under .github/ is library shipped to other repositories.
+name: Self check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint workflows and scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The self-reference check asks git which commit last touched an
+          # action or a script; a shallow clone cannot answer that.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: actionlint
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color .github/workflows/*.yaml
+
+      - name: shellcheck
+        run: find scripts -type f -name '*.sh' -exec shellcheck {} +
+
+      - name: zizmor
+        run: pipx run zizmor --pedantic --min-severity high .github/workflows
+
+      # Catches what the linters cannot: a pin that lags behind the action or
+      # script it points at. That fails at runtime, not at parse time — and a
+      # tag would freeze it permanently.
+      - name: Self references
+        run: scripts/ci/check-self-references.sh

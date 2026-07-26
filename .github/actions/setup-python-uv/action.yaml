@@ -1,0 +1,22 @@
+name: Setup Python and uv
+description: Installs uv with a warm cache and syncs the virtualenv.
+
+inputs:
+  python-version:
+    description: Python version to install. Overrides .python-version.
+    required: false
+    default: "3.14"
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      with:
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+        python-version: ${{ inputs.python-version }}
+
+    - name: Sync dependencies
+      shell: bash
+      run: uv sync --frozen
