@@ -1,0 +1,202 @@
+# LIBRARY — called by other repositories, never runs on its own. It sits in
+# .github/workflows/ only because GitHub accepts reusable workflows nowhere
+# else. This repository's own CI is self-check.yaml.
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Package name, also the container image name.
+        required: true
+        type: string
+      port:
+        description: Port the container listens on.
+        required: true
+        type: number
+      sha:
+        description: Release commit on main.
+        required: true
+        type: string
+      version:
+        description: Version without the leading v.
+        required: true
+        type: string
+      tag:
+        description: Tag to create, including the leading v.
+        required: true
+        type: string
+    outputs:
+      digest:
+        description: Digest of the released image.
+        value: ${{ jobs.publish.outputs.digest }}
+      release_url:
+        description: URL of the published release.
+        value: ${{ jobs.publish.outputs.release_url }}
+      prerelease:
+        description: Whether the version carries a prerelease suffix.
+        value: ${{ jobs.publish.outputs.prerelease }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      digest: ${{ steps.digests.outputs.digest }}
+      release_url: ${{ steps.release.outputs.release_url }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      # Puts this repository on disk and hands back its path. A second
+      # actions/checkout cannot reach it — see the action's own note.
+      - id: scripts
+        uses: leonweimann/rigitup-workflows/.github/actions/scripts@f5130146cdffc848aaa255ca04ba7cd947438b10 # main
+
+      - name: Resolve the version
+        id: version
+        env:
+          SCRIPTS: ${{ steps.scripts.outputs.path }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          "$SCRIPTS/scripts/release/resolve-version.sh"
+
+      - name: Compare the resolved version against the caller
+        env:
+          RESOLVED: ${{ steps.version.outputs.version }}
+          EXPECTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [ "$RESOLVED" = "$EXPECTED" ] || {
+            echo "::error::tag resolves to $RESOLVED but the caller passed $EXPECTED"
+            exit 1
+          }
+
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect the image digest
+        id: digests
+        env:
+          SCRIPTS: ${{ steps.scripts.outputs.path }}
+          SHA: ${{ inputs.sha }}
+          APP: ${{ inputs.app }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NAMESPACE: ${{ steps.version.outputs.namespace }}
+          MANIFEST_PATH: ${{ runner.temp }}/release-manifest.json
+        run: |
+          "$SCRIPTS/scripts/release/collect-image-digests.sh"
+
+      - name: Promote the digest onto version tags
+        env:
+          SCRIPTS: ${{ steps.scripts.outputs.path }}
+          APP: ${{ inputs.app }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MAJOR: ${{ steps.version.outputs.major }}
+          MINOR: ${{ steps.version.outputs.minor }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          MANIFEST_PATH: ${{ runner.temp }}/release-manifest.json
+        run: |
+          "$SCRIPTS/scripts/release/promote-images.sh"
+
+      # Unsigned on purpose: the standard path has no GPG key and no GitHub
+      # App. The tag is created through the API with the workflow token.
+      - name: Create the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2> /dev/null); then
+            [ "$existing" = "$SHA" ] || {
+              echo "::error::$TAG points at $existing, expected $SHA"
+              exit 1
+            }
+            echo "$TAG already exists and matches"
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$SHA" > /dev/null
+          echo "created $TAG at $SHA"
+
+      - name: Compose the release notes
+        env:
+          SCRIPTS: ${{ steps.scripts.outputs.path }}
+          GH_TOKEN: ${{ github.token }}
+          APP: ${{ inputs.app }}
+          TAG: ${{ inputs.tag }}
+          MANIFEST_PATH: ${{ runner.temp }}/release-manifest.json
+          OUTPUT_PATH: ${{ runner.temp }}/release-notes.md
+        run: |
+          "$SCRIPTS/scripts/release/release-notes.sh"
+
+      - name: Create and verify the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          MANIFEST_PATH: ${{ runner.temp }}/release-manifest.json
+          NOTES_PATH: ${{ runner.temp }}/release-notes.md
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG"
+              --notes-file "$NOTES_PATH")
+            [ "$PRERELEASE" = true ] && args+=(--prerelease)
+            gh release create "$TAG" "${args[@]}" "$MANIFEST_PATH"
+          fi
+
+          url=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          echo "release_url=$url" >> "$GITHUB_OUTPUT"
+
+          # Immutability is reported by the API, not by a gh subcommand, and it
+          # is not established the instant the release is created.
+          for attempt in 1 2 3 4 5; do
+            immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.immutable // "absent"')
+            [ "$immutable" = true ] && break
+            echo "attempt $attempt: immutable=$immutable"
+            sleep 3
+          done
+
+          case "$immutable" in
+            true) echo "$TAG is immutable" ;;
+            absent) echo "::warning::the API reports no immutable field for $TAG" ;;
+            *)
+              echo "::error::$TAG is not immutable although the setting is enabled"
+              exit 1
+              ;;
+          esac
+
+      - name: Summarize
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ steps.digests.outputs.digest }}
+          URL: ${{ steps.release.outputs.release_url }}
+          MANIFEST_PATH: ${{ runner.temp }}/release-manifest.json
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release $TAG"
+            echo
+            echo "- Digest: \`$DIGEST\`"
+            echo "- Release: $URL"
+            echo
+            echo '```json'
+            cat "$MANIFEST_PATH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

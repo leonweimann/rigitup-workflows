@@ -1,0 +1,204 @@
+# LIBRARY — called by other repositories, never runs on its own. It sits in
+# .github/workflows/ only because GitHub accepts reusable workflows nowhere
+# else. This repository's own CI is self-check.yaml.
+name: uv CI
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Package name, also used as the container image name.
+        required: true
+        type: string
+      port:
+        description: Port the container listens on.
+        required: true
+        type: number
+      python-version:
+        description: Python version to install. Overrides .python-version.
+        required: false
+        type: string
+        default: "3.14"
+    outputs:
+      is_release:
+        description: Whether the pushed commit on main is a release commit.
+        value: ${{ jobs.classify.outputs.is_release }}
+      part:
+        description: patch, minor or major.
+        value: ${{ jobs.classify.outputs.part }}
+      version:
+        description: Version without the leading v.
+        value: ${{ jobs.classify.outputs.version }}
+      tag:
+        description: Tag to create, including the leading v.
+        value: ${{ jobs.classify.outputs.tag }}
+      pr_number:
+        description: Number of the release pull request.
+        value: ${{ jobs.classify.outputs.pr_number }}
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Referenced as owner/repo/path@ref, not ./.github/actions/… — inside a
+      # reusable workflow a relative path resolves against the *calling*
+      # repository, where this action does not exist.
+      - uses: leonweimann/rigitup-workflows/.github/actions/setup-python-uv@f5130146cdffc848aaa255ca04ba7cd947438b10 # main
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Check types
+        run: uv run mypy
+
+      - name: Test
+        run: uv run pytest
+
+  docker-check:
+    name: Docker check
+    # On main the image is built for real and pushed, so building it twice
+    # would only burn a runner.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # PR merge-ref caches cannot be reused by main or sibling PRs.
+      DOCKER_BUILD_RECORD_UPLOAD: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build ${{ inputs.app }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: local/${{ inputs.app }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ inputs.app }}
+
+      # The script lives in this repository, so it arrives as an action rather
+      # than a second checkout — see the action's own note on why.
+      - uses: leonweimann/rigitup-workflows/.github/actions/smoke-test-container@f5130146cdffc848aaa255ca04ba7cd947438b10 # main
+        with:
+          image: local/${{ inputs.app }}:${{ github.sha }}
+          port: ${{ inputs.port }}
+
+  classify:
+    name: Classify
+    # Only a push to main can be a release. Pull requests and other events
+    # leave every output empty, and the caller's release job stays skipped.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      is_release: ${{ steps.classify.outputs.is_release }}
+      part: ${{ steps.classify.outputs.part }}
+      version: ${{ steps.classify.outputs.version }}
+      tag: ${{ steps.classify.outputs.tag }}
+      pr_number: ${{ steps.classify.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: classify
+        uses: leonweimann/rigitup-workflows/.github/actions/classify-release@f5130146cdffc848aaa255ca04ba7cd947438b10 # main
+        with:
+          token: ${{ github.token }}
+          sha: ${{ github.sha }}
+
+  docker-publish:
+    name: Docker publish
+    needs: classify
+    # Only a release commit gets an image. Every other push to main would
+    # produce a layer nobody ever references.
+    if: needs.classify.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: 7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Lowercase the image namespace
+        id: namespace
+        run: echo "value=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish ${{ inputs.app }}
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ steps.namespace.outputs.value }}/${{ inputs.app }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ inputs.app }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.app }}
+
+      - name: Verify the published digest
+        env:
+          APP: ${{ inputs.app }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::build returned invalid digest '$DIGEST'"
+            exit 1
+          }
+          namespace=${GITHUB_REPOSITORY,,}
+          reference="ghcr.io/$namespace/$APP@$DIGEST"
+          actual=$(docker buildx imagetools inspect "$reference" --format '{{.Manifest.Digest}}')
+          [ "$actual" = "$DIGEST" ] || {
+            echo "::error::$reference resolved to $actual"
+            exit 1
+          }
+          echo "$reference is present and addressable"
+
+      - name: Smoke test the published image
+        uses: leonweimann/rigitup-workflows/.github/actions/smoke-test-container@f5130146cdffc848aaa255ca04ba7cd947438b10 # main
+        with:
+          image: ghcr.io/${{ steps.namespace.outputs.value }}/${{ inputs.app }}@${{ steps.build.outputs.digest }}
+          port: ${{ inputs.port }}

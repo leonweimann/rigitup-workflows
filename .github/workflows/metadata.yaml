@@ -1,0 +1,169 @@
+# LIBRARY — called by other repositories, never runs on its own. It sits in
+# .github/workflows/ only because GitHub accepts reusable workflows nowhere
+# else. This repository's own CI is self-check.yaml.
+name: Metadata
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Classify and assign
+    # Categorization is already required before a PR enters a merge queue. Emit
+    # this required check for merge groups without allocating another runner.
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Assign the author
+        if: github.event.action == 'opened'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.issue.user.login || github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          # Release PRs are fully mechanical and auto-merge after CI.
+          if [ "$IS_PR" = true ] && [[ "$HEAD_REF" == release/v* ]] && [[ "$PR_TITLE" =~ ^release\((patch|minor|major)\):\ v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            exit 0
+          fi
+
+          # Other bots cannot be assignees, so ask human collaborators.
+          if [[ "$AUTHOR" == *"[bot]" ]]; then
+            if [ "$IS_PR" = true ]; then
+              reviewers=$(gh api "repos/$GH_REPO/collaborators" \
+                --jq '[.[] | select(.permissions.push) | select(.type != "Bot") | .login] | join(",")')
+              if [ -n "$reviewers" ]; then
+                gh pr edit "$NUMBER" --add-reviewer "$reviewers"
+                echo "review requested from $reviewers"
+              fi
+            fi
+            exit 0
+          fi
+
+          gh api "repos/$GH_REPO/issues/$NUMBER/assignees" \
+            -f "assignees[]=$AUTHOR" > /dev/null
+
+          # The API silently ignores users without repository access.
+          if ! gh api "repos/$GH_REPO/issues/$NUMBER" \
+            --jq '.assignees[].login' | grep -qx "$AUTHOR"; then
+            echo "::error::$AUTHOR was not assigned — do they have access to this repository?"
+            exit 1
+          fi
+          echo "assigned to $AUTHOR"
+
+      - name: Label from title
+        # Opening or retitling a PR establishes the default category. Label-only
+        # events skip this step so collaborators can override it manually.
+        if: >-
+          github.event_name == 'pull_request' &&
+          (github.event.action == 'opened' || github.event.changes.title.from != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          managed=(
+            feature performance fix documentation
+            tooling maintenance dependencies revert
+          )
+
+          # feat: … / fix(api): … / feat(api)!: … → type and scope.
+          prefix_re='^([a-z]+)(\(([^)]*)\))?!?: '
+          type="" scope=""
+          if [[ "$TITLE" =~ $prefix_re ]]; then
+            type="${BASH_REMATCH[1]}"
+            scope="${BASH_REMATCH[3]:-}"
+          fi
+
+          case "$type" in
+            feat) label=feature ;;
+            perf) label=performance ;;
+            fix) label=fix ;;
+            revert) label=revert ;;
+            docs) label=documentation ;;
+            ci) label=tooling ;;
+            build)
+              if [ "$scope" = deps ] || [ "$scope" = deps-dev ]; then
+                label=dependencies
+              else
+                label=tooling
+              fi
+              ;;
+            chore)
+              if [ "$scope" = deps ] || [ "$scope" = deps-dev ]; then
+                label=dependencies
+              else
+                label=maintenance
+              fi
+              ;;
+            ref | refactor | test) label=maintenance ;;
+            *) label="" ;;
+          esac
+
+          current=$(gh pr view "$PR" --json labels --jq '[.labels[].name] | join(" ")')
+          for candidate in "${managed[@]}"; do
+            if [[ " $current " == *" $candidate "* ]] && [ "$candidate" != "$label" ]; then
+              gh pr edit "$PR" --remove-label "$candidate"
+            fi
+          done
+
+          if [ -n "$label" ]; then
+            gh pr edit "$PR" --add-label "$label"
+          fi
+
+      - name: Require a release-note category
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          current=$(gh pr view "$PR" --json labels --jq '[.labels[].name] | join(" ")')
+
+          # Keep this list aligned with .github/release.yaml. The two exclusion
+          # labels are valid explicit decisions, not note categories.
+          accepted=(
+            ignore-for-release deployment
+            feature performance fix documentation
+            tooling maintenance dependencies revert
+          )
+
+          match_count=0
+          matches=""
+          for label in "${accepted[@]}"; do
+            if [[ " $current " == *" $label "* ]]; then
+              match_count=$((match_count + 1))
+              matches="${matches:+$matches }$label"
+            fi
+          done
+
+          if [ "$match_count" -eq 1 ]; then
+            echo "PR #$PR is classified by '$matches'"
+            exit 0
+          fi
+
+          if [ "$match_count" -eq 0 ]; then
+            echo "::error::PR #$PR has no release-note category. Use a supported conventional title or apply exactly one of: ${accepted[*]}"
+            exit 1
+          fi
+
+          echo "::error::PR #$PR has multiple release-note categories: $matches. Keep exactly one of: ${accepted[*]}"
+          exit 1
