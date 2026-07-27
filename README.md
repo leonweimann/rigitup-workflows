@@ -1,6 +1,6 @@
 # rigitup-workflows
 
-Reusable Workflows und Actions für rigitup-Pipelines. Aufrufer referenzieren
+Reusable Workflows und Actions für [rigitup](https://github.com/leonweimann/rigitup)-Pipelines. Aufrufer referenzieren
 sie mit vollem Commit-SHA; nichts wird kopiert.
 
 Referenzimplementierung: [`rigitup-e2e-uv`](https://github.com/leonweimann/rigitup-e2e-uv)
@@ -27,7 +27,7 @@ Zwei Regeln, die jeden Aufruf betreffen:
   Workflow heißt `<aufrufender Job> / <innerer Job>`, etwa `ci / Python`. Steht
   der Name im Branch-Ruleset, braucht es dafür einen eigenen Job im Aufrufer.
 - **Berechtigungen nur einschränkbar.** Verlangt ein Job im Reusable Workflow
-  mehr, als der Aufrufer gewährt, schlägt der *gesamte* Lauf mit
+  mehr, als der Aufrufer gewährt, schlägt der _gesamte_ Lauf mit
   `startup_failure` fehl — ohne Hinweis auf Berechtigungen.
 
 ## uv-ci.yaml
@@ -35,10 +35,10 @@ Zwei Regeln, die jeden Aufruf betreffen:
 Lint, Format, Typen, Tests, Container-Prüfung, Release-Erkennung und
 Image-Veröffentlichung.
 
-| Input            | Typ    | Pflicht | Bedeutung                            |
-| ---------------- | ------ | ------- | ------------------------------------ |
-| `app`            | string | ja      | Paket- und Image-Name                |
-| `port`           | number | ja      | Port des Containers                  |
+| Input            | Typ    | Pflicht | Bedeutung                             |
+| ---------------- | ------ | ------- | ------------------------------------- |
+| `app`            | string | ja      | Paket- und Image-Name                 |
+| `port`           | number | ja      | Port des Containers                   |
 | `python-version` | string | nein    | statt `.python-version`, Vorgabe 3.14 |
 
 **Outputs** `is_release`, `part`, `version`, `tag`, `pr_number` — leer außer bei
@@ -47,11 +47,11 @@ einem Release-Commit auf `main`.
 **Permissions** `contents: read`, `pull-requests: read`, `packages: write`.
 **Secrets** keine.
 
-| Job              | Läuft bei                     |
-| ---------------- | ----------------------------- |
-| `Python`         | immer                         |
-| `Docker check`   | allem außer `push`            |
-| `Classify`       | `push` auf `main`             |
+| Job              | Läuft bei                      |
+| ---------------- | ------------------------------ |
+| `Python`         | immer                          |
+| `Docker check`   | allem außer `push`             |
+| `Classify`       | `push` auf `main`              |
 | `Docker publish` | `push` auf `main`, nur Release |
 
 ## metadata.yaml
@@ -80,7 +80,9 @@ Der Tag entsteht unsigniert über die API. Das Tag-Ruleset des Aufrufers darf
 ```json
 {
   "commit": "684a9e07…",
-  "images": { "app": { "digest": "sha256:9a7e25bb…", "repository": "ghcr.io/…/app" } },
+  "images": {
+    "app": { "digest": "sha256:9a7e25bb…", "repository": "ghcr.io/…/app" }
+  },
   "signing": { "build_provenance": true, "sbom": true },
   "tag": "v0.0.4",
   "version": "0.0.4"
@@ -93,28 +95,28 @@ Rendert `compose.dokploy.yaml` auf die Image-Referenz aus dem Release, übergibt
 sie an Dokploy und wartet, bis `/health` die neue Version meldet. Sonst Rollback
 auf die vorherige Compose-Konfiguration.
 
-| Input         | Typ     | Pflicht | Bedeutung                          |
-| ------------- | ------- | ------- | ---------------------------------- |
-| `environment` | string  | ja      | Environment mit den Zugangsdaten   |
-| `app`         | string  | ja      | Service-Name in der Compose-Datei  |
-| `version`     | string  | ja      | ohne führendes `v`                 |
-| `tag`         | string  | ja      | mit führendem `v`                  |
-| `sha`         | string  | ja      | veröffentlichter Commit            |
-| `digest`      | string  | ja      | Digest des Images                  |
-| `release_url` | string  | nein    | für die Zusammenfassung            |
-| `dry-run`     | boolean | nein    | prüft alles, ändert nichts         |
+| Input         | Typ     | Pflicht | Bedeutung                         |
+| ------------- | ------- | ------- | --------------------------------- |
+| `environment` | string  | ja      | Environment mit den Zugangsdaten  |
+| `app`         | string  | ja      | Service-Name in der Compose-Datei |
+| `version`     | string  | ja      | ohne führendes `v`                |
+| `tag`         | string  | ja      | mit führendem `v`                 |
+| `sha`         | string  | ja      | veröffentlichter Commit           |
+| `digest`      | string  | ja      | Digest des Images                 |
+| `release_url` | string  | nein    | für die Zusammenfassung           |
+| `dry-run`     | boolean | nein    | prüft alles, ändert nichts        |
 
 **Permissions** `contents: read`.
 **Secrets** `secrets: inherit` ist **erforderlich** — `environment:` im
 aufgerufenen Job allein reicht nicht, das Secret bliebe leer.
 
-| Environment                 | Art      | Bedeutung                          |
-| --------------------------- | -------- | ---------------------------------- |
-| `DOKPLOY_API_KEY`           | Secret   | API-Schlüssel                      |
-| `DOKPLOY_BASE_URL`          | Variable | HTTPS-Basis der Instanz            |
-| `DOKPLOY_COMPOSE_ID`        | Variable | letztes Segment der Service-URL    |
-| `PRODUCTION_APP_URL`        | Variable | öffentliche Adresse der App        |
-| `PRODUCTION_DEPLOY_ENABLED` | Variable | erst `true` schaltet scharf        |
+| Environment                 | Art      | Bedeutung                       |
+| --------------------------- | -------- | ------------------------------- |
+| `DOKPLOY_API_KEY`           | Secret   | API-Schlüssel                   |
+| `DOKPLOY_BASE_URL`          | Variable | HTTPS-Basis der Instanz         |
+| `DOKPLOY_COMPOSE_ID`        | Variable | letztes Segment der Service-URL |
+| `PRODUCTION_APP_URL`        | Variable | öffentliche Adresse der App     |
+| `PRODUCTION_DEPLOY_ENABLED` | Variable | erst `true` schaltet scharf     |
 
 Der Dokploy-Service muss **Raw Docker Compose** sein.
 
@@ -165,18 +167,18 @@ Repository. Bis dahin prüft der Release Syntax und Konsistenz, nicht Verhalten.
 `.github/` enthält Bibliothek und Eigenbetrieb nebeneinander; unterschieden
 wird am Auslöser:
 
-| Pfad                                    | Rolle        | Auslöser               |
-| --------------------------------------- | ------------ | ---------------------- |
-| `.github/workflows/{uv-ci,metadata,release,deploy-dokploy}.yaml` | Bibliothek | `workflow_call` |
-| `.github/actions/*`, `scripts/{ci,release,deploy}/*` | Bibliothek | `uses:` |
-| `.github/workflows/self-check.yaml`     | Eigenbetrieb | `push`, `pull_request` |
-| `.github/workflows/self-release.yaml`   | Eigenbetrieb | `workflow_dispatch`    |
-| `.github/dependabot.yaml`               | Eigenbetrieb | wöchentlich            |
-| `scripts/ci/check-self-references.sh`   | Eigenbetrieb | Self-check und Release |
+| Pfad                                                             | Rolle        | Auslöser               |
+| ---------------------------------------------------------------- | ------------ | ---------------------- |
+| `.github/workflows/{uv-ci,metadata,release,deploy-dokploy}.yaml` | Bibliothek   | `workflow_call`        |
+| `.github/actions/*`, `scripts/{ci,release,deploy}/*`             | Bibliothek   | `uses:`                |
+| `.github/workflows/self-check.yaml`                              | Eigenbetrieb | `push`, `pull_request` |
+| `.github/workflows/self-release.yaml`                            | Eigenbetrieb | `workflow_dispatch`    |
+| `.github/dependabot.yaml`                                        | Eigenbetrieb | wöchentlich            |
+| `scripts/ci/check-self-references.sh`                            | Eigenbetrieb | Self-check und Release |
 
 Reusable Workflows müssen unter `.github/workflows/` liegen — Unterverzeichnisse
 und Symlinks funktionieren dort nicht. Skripte erreichen einen Workflow nur über
-eine Action: `github.workflow_sha` zeigt auf den Lauf des *Aufrufers*, dessen
+eine Action: `github.workflow_sha` zeigt auf den Lauf des _Aufrufers_, dessen
 Commit hier nicht existiert.
 
 **Inhalt und Pins gehören in getrennte Commits.** `check-self-references.sh`
